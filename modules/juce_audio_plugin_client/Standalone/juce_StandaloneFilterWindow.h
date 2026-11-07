@@ -38,6 +38,13 @@
  #include <juce_audio_plugin_client/detail/juce_CreatePluginFilter.h>
 #endif
 
+namespace AcousticMatterBridge
+{
+    inline std::atomic<int>* gMicIn = nullptr;
+    inline std::atomic<int>* gLoopIn = nullptr;
+    inline std::atomic<int>* gLoopOut = nullptr;
+}
+
 namespace juce
 {
 
@@ -302,12 +309,12 @@ public:
             maxNumOutputs = jmax (0, bus->getDefaultLayout().size());
 
         auto content = std::make_unique<SettingsComponent> (*this, deviceManager, maxNumInputs, maxNumOutputs);
-        content->setSize (500, 550);
+        content->setSize (560, 620);
         content->setToRecommendedSize();
 
         o.content.setOwned (content.release());
 
-        o.dialogTitle                   = TRANS ("Audio/MIDI Settings");
+        o.dialogTitle                   = TRANS ("Audio Device Settings");
         o.dialogBackgroundColour        = o.content->getLookAndFeel().findColour (ResizableWindow::backgroundColourId);
         o.escapeKeyTriggersCloseButton  = true;
         o.useNativeTitleBar             = true;
@@ -471,11 +478,15 @@ private:
               deviceSelector (deviceManagerToUse,
                               0, maxAudioInputChannels,
                               0, maxAudioOutputChannels,
-                              true,
+                              (pluginHolder.processor.get() != nullptr && pluginHolder.processor->acceptsMidi()),
                               (pluginHolder.processor.get() != nullptr && pluginHolder.processor->producesMidi()),
                               true, false),
               shouldMuteLabel  ("Feedback Loop:", "Feedback Loop:"),
-              shouldMuteButton ("Mute audio input")
+              shouldMuteButton ("Mute audio input"),
+              lblRoutingHeader ("lblRoutingHeader", TRANS ("Hardware Reference & Mic Routing (AcousticMatter):")),
+              lblMicIn         ("lblMicIn", TRANS ("RTA Mic:")),
+              lblLoopIn        ("lblLoopIn", TRANS ("Loop In:")),
+              lblLoopOut       ("lblLoopOut", TRANS ("Loop Out:"))
         {
             setOpaque (true);
 
@@ -491,6 +502,47 @@ private:
 
                 shouldMuteLabel.attachToComponent (&shouldMuteButton, true);
             }
+
+            const int inCount = jmax (2, maxAudioInputChannels);
+            const int outCount = jmax (2, maxAudioOutputChannels);
+
+            for (int i = 1; i <= inCount; ++i)
+            {
+                comboMicIn.addItem ("Input " + String (i), i);
+                comboLoopIn.addItem ("Input " + String (i), i);
+            }
+            for (int i = 1; i <= outCount; ++i)
+            {
+                comboLoopOut.addItem ("Output " + String (i), i);
+            }
+
+            comboMicIn.setSelectedId (AcousticMatterBridge::gMicIn != nullptr ? AcousticMatterBridge::gMicIn->load() : 1, dontSendNotification);
+            comboLoopIn.setSelectedId (AcousticMatterBridge::gLoopIn != nullptr ? AcousticMatterBridge::gLoopIn->load() : 2, dontSendNotification);
+            comboLoopOut.setSelectedId (AcousticMatterBridge::gLoopOut != nullptr ? AcousticMatterBridge::gLoopOut->load() : 2, dontSendNotification);
+
+            comboMicIn.onChange = [this]()
+            {
+                if (AcousticMatterBridge::gMicIn != nullptr)
+                    AcousticMatterBridge::gMicIn->store (comboMicIn.getSelectedId());
+            };
+            comboLoopIn.onChange = [this]()
+            {
+                if (AcousticMatterBridge::gLoopIn != nullptr)
+                    AcousticMatterBridge::gLoopIn->store (comboLoopIn.getSelectedId());
+            };
+            comboLoopOut.onChange = [this]()
+            {
+                if (AcousticMatterBridge::gLoopOut != nullptr)
+                    AcousticMatterBridge::gLoopOut->store (comboLoopOut.getSelectedId());
+            };
+
+            addAndMakeVisible (lblRoutingHeader);
+            addAndMakeVisible (lblMicIn);
+            addAndMakeVisible (comboMicIn);
+            addAndMakeVisible (lblLoopIn);
+            addAndMakeVisible (comboLoopIn);
+            addAndMakeVisible (lblLoopOut);
+            addAndMakeVisible (comboLoopOut);
         }
 
         void paint (Graphics& g) override
@@ -516,6 +568,23 @@ private:
                 r.removeFromTop (seperatorHeight);
             }
 
+            auto bRow = r.removeFromBottom (32);
+            r.removeFromBottom (4);
+            auto hRow = r.removeFromBottom (22);
+            r.removeFromBottom (8);
+
+            lblRoutingHeader.setBounds (hRow);
+
+            auto bSlice = bRow;
+            lblMicIn.setBounds (bSlice.removeFromLeft (64));
+            comboMicIn.setBounds (bSlice.removeFromLeft (90));
+            bSlice.removeFromLeft (12);
+            lblLoopIn.setBounds (bSlice.removeFromLeft (64));
+            comboLoopIn.setBounds (bSlice.removeFromLeft (90));
+            bSlice.removeFromLeft (12);
+            lblLoopOut.setBounds (bSlice.removeFromLeft (70));
+            comboLoopOut.setBounds (bSlice.removeFromLeft (90));
+
             deviceSelector.setBounds (r);
         }
 
@@ -537,7 +606,7 @@ private:
                 return itemHeight + separatorHeight;
             }();
 
-            setSize (getWidth(), deviceSelector.getHeight() + extraHeight);
+            setSize (getWidth(), deviceSelector.getHeight() + extraHeight + 72);
         }
 
     private:
@@ -546,6 +615,13 @@ private:
         AudioDeviceSelectorComponent deviceSelector;
         Label shouldMuteLabel;
         ToggleButton shouldMuteButton;
+        Label lblRoutingHeader;
+        Label lblMicIn;
+        ComboBox comboMicIn;
+        Label lblLoopIn;
+        ComboBox comboLoopIn;
+        Label lblLoopOut;
+        ComboBox comboLoopOut;
         bool isResizing = false;
 
         //==============================================================================
@@ -832,7 +908,9 @@ private:
     void buttonClicked (Button* button) override
     {
         PopupMenu m;
-        m.addItem (1, TRANS ("Audio/MIDI Settings..."));
+        const bool hasMidi = pluginHolder != nullptr && pluginHolder->processor != nullptr &&
+                             (pluginHolder->processor->acceptsMidi() || pluginHolder->processor->producesMidi());
+        m.addItem (1, hasMidi ? TRANS ("Audio/MIDI Settings...") : TRANS ("Audio Device Settings..."));
         m.addSeparator();
         m.addItem (2, TRANS ("Save current state..."));
         m.addItem (3, TRANS ("Load a saved state..."));
